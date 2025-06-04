@@ -1,171 +1,169 @@
-# LTL Charge Calculator - Web Version using Streamlit
 import streamlit as st
-import base64
+from fpdf import FPDF
 from io import BytesIO
-from PIL import Image
-import requests
+import math
 
-st.set_page_config(page_title="Narchin Transport - LTL Freight Calculator", layout="wide")
+# ------------------ CONFIGURATION ------------------
+CHINA_CITIES = [
+    "Beijing", "Shanghai", "Guangzhou", "Shenzhen", "Chengdu",
+    "Tianjin", "Hangzhou", "Wuhan", "Chongqing", "Nanjing",
+    "Xi'an", "Suzhou", "Shenyang", "Qingdao", "Dalian",
+    "Zhengzhou", "Jinan", "Changsha", "Kunming", "Harbin"
+]
 
-# --------------------
-# Constants
-# --------------------
-CHINA_RATE = 0.2
-BAKU_RATE = 0.3
-TBILISI_RATE = 0.35
-CHINA_CUSTOM_FEE = 70
+DESTINATIONS = {
+    "Baku, Azerbaijan": 0.3,
+    "Tbilisi, Georgia": 0.35
+}
+
+CHINA_TO_HORGOS_RATE = 0.2
+CHINA_CUSTOMS_FEE = 70
 KZ_TRANSIT_FEE = 200
 LOCAL_HANDLING_FEE = 100
 
-CHINA_CITIES = [
-    "Beijing", "Shanghai", "Guangzhou", "Shenzhen", "Chengdu",
-    "Chongqing", "Tianjin", "Hangzhou", "Nanjing", "Wuhan",
-    "Xi'an", "Dongguan", "Suzhou", "Shenyang", "Qingdao",
-    "Dalian", "Zhengzhou", "Jinan", "Fuzhou", "Changsha"
-]
+def calculate_chargeable_weight(length, width, height, weight):
+    volume_cbm = (length * width * height) / 1000000
+    chargeable_weight = max(weight, volume_cbm * 333)
+    return weight, volume_cbm, chargeable_weight
 
-DESTINATIONS = ["Baku, Azerbaijan", "Tbilisi, Georgia"]
-
-# --------------------
-# Calculation Logic
-# --------------------
-def calculate_charge(length, width, height, weight):
-    volume_cbm = (length / 100) * (width / 100) * (height / 100)
-    volumetric_weight = volume_cbm * 333
-    chargeable_weight = max(weight, volumetric_weight)
-    return volume_cbm, volumetric_weight, chargeable_weight
-
-def calculate_total_cost(pallets, destination):
-    total_actual_weight = 0
-    total_volume_cbm = 0
+def calculate_total(pallets, origin_city, destination, insurance_rate, cargo_value):
+    total_weight = 0
+    total_volume = 0
     total_chargeable_weight = 0
 
     for pallet in pallets:
-        vol, vol_weight, ch_weight = calculate_charge(
-            pallet['length'], pallet['width'], pallet['height'], pallet['weight']
+        weight, volume, chargeable_weight = calculate_chargeable_weight(
+            pallet["length"], pallet["width"], pallet["height"], pallet["weight"]
         )
-        vol *= pallet['quantity']
-        vol_weight *= pallet['quantity']
-        ch_weight *= pallet['quantity']
-        total_volume_cbm += vol
-        total_actual_weight += pallet['weight'] * pallet['quantity']
-        total_chargeable_weight += ch_weight
+        total_weight += weight
+        total_volume += volume
+        total_chargeable_weight += chargeable_weight
 
-    cost_to_horgos = total_chargeable_weight * CHINA_RATE
-    cost_from_horgos = total_chargeable_weight * (BAKU_RATE if destination == "Baku, Azerbaijan" else TBILISI_RATE)
+    cost_china_to_horgos = total_chargeable_weight * CHINA_TO_HORGOS_RATE
+    cost_horgos_to_dest = total_chargeable_weight * DESTINATIONS[destination]
+    insurance_cost = (insurance_rate / 100) * cargo_value
 
-    total_cost = cost_to_horgos + cost_from_horgos + CHINA_CUSTOM_FEE + KZ_TRANSIT_FEE + LOCAL_HANDLING_FEE
+    total_cost = (
+        cost_china_to_horgos +
+        cost_horgos_to_dest +
+        CHINA_CUSTOMS_FEE +
+        KZ_TRANSIT_FEE +
+        LOCAL_HANDLING_FEE +
+        insurance_cost
+    )
 
     return {
-        "Total Actual Weight (kg)": round(total_actual_weight, 2),
-        "Total Volume (CBM)": round(total_volume_cbm, 2),
+        "Total Actual Weight (kg)": round(total_weight, 2),
+        "Total Volume (CBM)": round(total_volume, 2),
         "Chargeable Weight (kg)": round(total_chargeable_weight, 2),
-        "Cost China to Horgos (USD)": round(cost_to_horgos, 2),
-        "Cost Horgos to Destination (USD)": round(cost_from_horgos, 2),
-        "China Customs Fee (USD)": CHINA_CUSTOM_FEE,
+        f"Cost {origin_city} to Horgos (USD)": round(cost_china_to_horgos, 2),
+        f"Cost Horgos to {destination} (USD)": round(cost_horgos_to_dest, 2),
+        "China Customs Fee (USD)": CHINA_CUSTOMS_FEE,
         "KZ Transit Fee (USD)": KZ_TRANSIT_FEE,
         "Local Handling Fee (USD)": LOCAL_HANDLING_FEE,
+        "Insurance Cost (USD)": round(insurance_cost, 2),
         "Total Cost (USD)": round(total_cost, 2)
     }
 
-# --------------------
-# PDF Generator
-# --------------------
-def generate_invoice(data, origin, destination):
-    from fpdf import FPDF
-    import tempfile
-
+def generate_invoice(result, origin_city, destination, stackable, insurance_rate, cargo_value, company_name):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", size=12)
 
-    # Add logo
-    logo_url = "https://www.narchin.az/images/logo-narchin.png"
-    try:
-        r = requests.get(logo_url)
-        if r.status_code == 200:
-            tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-            tmp_file.write(r.content)
-            tmp_file.close()
-            pdf.image(tmp_file.name, x=10, y=8, w=40)
-    except Exception as e:
-        pass
-
-    pdf.set_fill_color(0, 102, 153)
-    pdf.set_text_color(255)
-    pdf.cell(200, 10, "Narchin Transport - Freight Invoice", ln=True, align="C", fill=True)
-    pdf.set_text_color(0)
+    pdf.set_text_color(0, 80, 180)
+    pdf.set_font("Arial", 'B', 14)
+    pdf.cell(200, 10, txt="Narchin Transport | Harbin Zohor", ln=True, align='C')
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 10, txt="LTL Freight Calculator (China -> Horgos -> Baku/Tbilisi)", ln=True, align='C')
     pdf.ln(10)
-    pdf.cell(200, 10, f"From: {origin} to {destination}", ln=True)
 
-    for key, val in data.items():
-        pdf.cell(200, 10, f"{key}: {val}", ln=True)
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_font("Arial", size=12)
+    pdf.cell(200, 10, f"Origin City: {origin_city}", ln=True)
+    pdf.cell(200, 10, f"Destination City: {destination}", ln=True)
+    pdf.cell(200, 10, f"Stackable: {'Yes' if stackable else 'No'}", ln=True)
+    pdf.cell(200, 10, f"Insurance Rate: {insurance_rate}%", ln=True)
+    pdf.cell(200, 10, f"Cargo Value: {cargo_value} USD", ln=True)
+    pdf.ln(10)
 
-    # Footer with website
-    pdf.set_y(-20)
-    pdf.set_font("Arial", size=10)
-    pdf.set_text_color(128)
-    pdf.cell(0, 10, "Thank you for choosing Narchin Transport | www.narchin.az", ln=True, align="C")
+    for key, value in result.items():
+        pdf.cell(200, 10, f"{key}: {value}", ln=True)
 
     buffer = BytesIO()
-    pdf.output(buffer)
+    pdf_output = pdf.output(dest='S').encode('latin1', 'replace')
+    buffer.write(pdf_output)
     buffer.seek(0)
     return buffer
 
-# --------------------
-# UI
-# --------------------
-# Header with logo and color
-st.markdown("""
-    <style>
-    .main-header {
-        text-align:center;
-        background-color:#006699;
-        padding:20px;
-        border-radius:10px;
-        color:white;
-    }
-    </style>
-    <div class='main-header'>
-        <h1>Narchin Transport</h1>
-        <h3>LTL Freight Calculator (China → Horgos → Baku/Tbilisi)</h3>
-    </div>
-""", unsafe_allow_html=True)
+# ------------------ STREAMLIT APP ------------------
+st.set_page_config(page_title="LTL Freight Calculator", layout="centered")
+st.title("LTL Freight Calculator")
+st.subheader("Narchin Transport | Harbin Zohor")
 
-with st.form("ltl_form"):
-    st.subheader("Shipment Details")
+if "step" not in st.session_state:
+    st.session_state.step = 0
+
+if "num_pallets" not in st.session_state:
+    st.session_state.num_pallets = 1
+
+if "pallets" not in st.session_state:
+    st.session_state.pallets = [{} for _ in range(1)]
+
+if "calculation_result" not in st.session_state:
+    st.session_state.calculation_result = {}
+
+if "invoice_buffer" not in st.session_state:
+    st.session_state.invoice_buffer = None
+
+def reset_all():
+    st.session_state.step = 0
+    st.session_state.num_pallets = 1
+    st.session_state.pallets = [{} for _ in range(1)]
+    st.session_state.calculation_result = {}
+    st.session_state.invoice_buffer = None
+
+if st.button("Start Over"):
+    reset_all()
+
+if st.session_state.step == 0:
+    st.session_state.num_pallets = st.number_input("Number of Pallets", min_value=1, max_value=50, value=st.session_state.num_pallets)
+    if len(st.session_state.pallets) != st.session_state.num_pallets:
+        for i in range(st.session_state.num_pallets):
+            if i >= len(st.session_state.pallets):
+                st.session_state.pallets.append({})
+    if st.button("Next: Enter Pallet Details"):
+        st.session_state.step = 1
+
+if st.session_state.step == 1:
+    st.write("### Enter Details for Each Pallet")
+    for i in range(st.session_state.num_pallets):
+        with st.expander(f"Pallet {i+1}", expanded=True):
+            length = st.number_input(f"Length (cm) - Pallet {i+1}", min_value=1, key=f"length_{i}")
+            width = st.number_input(f"Width (cm) - Pallet {i+1}", min_value=1, key=f"width_{i}")
+            height = st.number_input(f"Height (cm) - Pallet {i+1}", min_value=1, key=f"height_{i}")
+            weight = st.number_input(f"Weight (kg) - Pallet {i+1}", min_value=1.0, key=f"weight_{i}")
+            st.session_state.pallets[i] = {"length": length, "width": width, "height": height, "weight": weight}
+
     origin_city = st.selectbox("Pickup City in China", CHINA_CITIES)
-    destination_city = st.selectbox("Delivery City", DESTINATIONS)
+    destination_city = st.selectbox("Delivery City", list(DESTINATIONS.keys()))
+    stackable = st.checkbox("Are the goods stackable?", value=True)
+    insurance_rate = st.number_input("Insurance Rate (%)", min_value=0.0, value=2.0)
+    cargo_value = st.number_input("Total Cargo Value (USD)", min_value=0.0, value=1000.0)
 
-    st.markdown("### Pallet Details")
-    pallet_count = st.number_input("Number of Different Pallet Types", min_value=1, value=1)
-    pallets = []
+    if st.button("Calculate Freight Cost"):
+        result = calculate_total(st.session_state.pallets, origin_city, destination_city, insurance_rate, cargo_value)
+        st.session_state.calculation_result = result
+        st.session_state.invoice_buffer = generate_invoice(result, origin_city, destination_city, stackable, insurance_rate, cargo_value, "")
+        st.session_state.step = 2
 
-    for i in range(int(pallet_count)):
-        st.markdown(f"#### Pallet {i+1}")
-        length = st.number_input(f"Length (cm) - Pallet {i+1}", min_value=0.0, value=120.0)
-        width = st.number_input(f"Width (cm) - Pallet {i+1}", min_value=0.0, value=80.0)
-        height = st.number_input(f"Height (cm) - Pallet {i+1}", min_value=0.0, value=100.0)
-        weight = st.number_input(f"Weight per Unit (kg) - Pallet {i+1}", min_value=0.0, value=200.0)
-        quantity = st.number_input(f"Number of Units - Pallet {i+1}", min_value=1, value=1)
+if st.session_state.step == 2:
+    st.write("## Freight Cost Calculation Result")
+    for key, value in st.session_state.calculation_result.items():
+        st.write(f"**{key}:** {value}")
 
-        pallets.append({
-            "length": length,
-            "width": width,
-            "height": height,
-            "weight": weight,
-            "quantity": quantity
-        })
-
-    submitted = st.form_submit_button("Calculate")
-
-if submitted:
-    result = calculate_total_cost(pallets, destination_city)
-    st.subheader("Calculation Result")
-    for key, value in result.items():
-        st.write(f"{key}: {value}")
-
-    invoice_buffer = generate_invoice(result, origin_city, destination_city)
-    b64 = base64.b64encode(invoice_buffer.read()).decode()
-    href = f'<a href="data:application/octet-stream;base64,{b64}" download="Narchin_Invoice.pdf">📥 Download Quote as PDF</a>'
-    st.markdown(href, unsafe_allow_html=True)
+    st.download_button(
+        label="📄 Download Invoice (PDF)",
+        data=st.session_state.invoice_buffer,
+        file_name="ltl_invoice.pdf",
+        mime="application/pdf"
+    )
